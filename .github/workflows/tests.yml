@@ -30,7 +30,12 @@ jobs:
           print("torch", torch.__version__)
           print("pyscipopt", pyscipopt.__version__)
           m = pyscipopt.Model()
-          print("SCIP", m.getVersion())
+          parts = []
+          for name in ("getMajorVersion", "getMinorVersion", "getTechVersion"):
+              fn = getattr(m, name, None)
+              if fn is not None:
+                  parts.append(str(fn()))
+          print("SCIP", ".".join(parts) if parts else "version API unavailable")
           PY
 
       - name: Run pure graph/model self-test
