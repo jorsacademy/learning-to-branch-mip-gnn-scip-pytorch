@@ -2,7 +2,11 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 from .expert import StrongBranchCollector
-from .problem import generate_set_cover_instance, build_scip_model
+from .problem import (
+    build_scip_model,
+    configure_branching_research_mode,
+    generate_set_cover_instance,
+)
 
 
 def collect_expert_dataset(
@@ -22,8 +26,8 @@ def collect_expert_dataset(
             n_variables=n_variables,
         )
         scip, _ = build_scip_model(instance)
+        configure_branching_research_mode(scip)
         scip.setLongintParam("limits/nodes", int(node_limit))
-        scip.setIntParam("presolving/maxrounds", 0)
 
         storage = []
         rule = StrongBranchCollector.make(
