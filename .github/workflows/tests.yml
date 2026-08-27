@@ -1,0 +1,58 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install CPU PyTorch, PySCIPOpt and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.3"
+          pip install "pyscipopt>=5.6" "numpy>=1.24"
+
+      - name: Show solver versions
+        run: |
+          python - <<'PY'
+          import torch, pyscipopt
+          print("torch", torch.__version__)
+          print("pyscipopt", pyscipopt.__version__)
+          m = pyscipopt.Model()
+          print("SCIP", m.getVersion())
+          PY
+
+      - name: Run pure graph/model self-test
+        run: python learning_to_branch.py --self-test
+
+      - name: Run regression and real SCIP integration tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run real strong-branching imitation and learned-branching smoke benchmark
+        run: |
+          python learning_to_branch.py \
+            --integration-smoke \
+            --seed 42 \
+            --constraints 18 \
+            --variables 40 \
+            --train-instances 4 \
+            --validation-instances 2 \
+            --test-instances 3 \
+            --samples-per-instance 5 \
+            --collection-node-limit 80 \
+            --epochs 5 \
+            --batch-size 12 \
+            --hidden-dim 32 \
+            --layers 2 \
+            --time-limit 6
