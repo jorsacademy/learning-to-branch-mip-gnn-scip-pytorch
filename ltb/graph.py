@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import re
 import numpy as np
 import torch
 from .problem import SetCoverInstance
@@ -13,6 +14,16 @@ class BranchState:
     candidate_mask: np.ndarray       # [V] bool
     expert_scores: np.ndarray | None = None
     expert_best: int | None = None
+
+
+def scip_variable_index(var, n_variables: int) -> int | None:
+    """Map original or transformed SCIP variable names back to benchmark index."""
+    name = str(var.name)
+    match = re.search(r"x_(\d+)$", name)
+    if match is None:
+        return None
+    index = int(match.group(1))
+    return index if 0 <= index < n_variables else None
 
 
 def static_graph_features(instance: SetCoverInstance):
@@ -56,12 +67,10 @@ def extract_scip_branch_state(
     vdyn = np.zeros((V, 4), dtype=np.float32)
     mask = np.zeros(V, dtype=bool)
 
-    name_to_idx = {f"x_{j}": j for j in range(V)}
     for var, sol, frac in zip(branch_cands, branch_cand_sols, branch_cand_fracs):
-        name = var.name
-        if name not in name_to_idx:
+        j = scip_variable_index(var, V)
+        if j is None:
             continue
-        j = name_to_idx[name]
         mask[j] = True
         vdyn[j, 0] = float(sol)
         vdyn[j, 1] = float(frac)
@@ -78,7 +87,7 @@ def extract_scip_branch_state(
     if expert_scores is not None:
         scores = np.full(V, -np.inf, dtype=np.float32)
         for var, score in zip(branch_cands, expert_scores):
-            j = name_to_idx.get(var.name)
+            j = scip_variable_index(var, V)
             if j is not None:
                 scores[j] = float(score)
         finite = np.flatnonzero(np.isfinite(scores))
