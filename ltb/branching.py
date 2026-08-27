@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import torch
-from .graph import extract_scip_branch_state
+from .graph import extract_scip_branch_state, scip_variable_index
 from .model import choose_candidate_index
 from .expert import strong_branch_scores
 
@@ -21,6 +21,9 @@ class LearnedBranchRule:
                 state = extract_scip_branch_state(
                     self.model, instance, cands, sols, fracs
                 )
+                if not np.any(state.candidate_mask):
+                    return {"result": SCIP_RESULT.DIDNOTRUN}
+
                 with torch.no_grad():
                     logits = network(
                         torch.tensor(state.constraint_features)[None],
@@ -30,8 +33,13 @@ class LearnedBranchRule:
                     mask = torch.tensor(state.candidate_mask)
                     j = choose_candidate_index(logits, mask)
 
-                name = f"x_{j}"
-                selected = next((k for k, var in enumerate(cands) if var.name == name), None)
+                selected = next(
+                    (
+                        k for k, var in enumerate(cands)
+                        if scip_variable_index(var, instance.n_variables) == j
+                    ),
+                    None,
+                )
                 if selected is None:
                     return {"result": SCIP_RESULT.DIDNOTRUN}
                 self.model.branchVarVal(cands[selected], sols[selected])
