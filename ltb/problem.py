@@ -38,34 +38,50 @@ def generate_set_cover_instance(
     max_demand: int = 2,
 ) -> SetCoverInstance:
     """
-    Random binary set-cover family with row coverage repairs.
+    Random set-cover family with an isolated odd-cycle covering core.
 
-    The generator does not plant an optimum. It only guarantees feasibility by
-    ensuring every row has at least max_demand incident columns.
+    The five-row/five-variable core is a weighted vertex-cover-style odd cycle.
+    With presolve/separation disabled it supplies a reproducible fractional LP
+    structure so branching callbacks are exercised. The remainder of the model
+    is random sparse set covering. No integer optimum is planted.
     """
     if not (0.02 <= density <= 0.8):
         raise ValueError("density outside supported range")
+    if n_constraints < 5 or n_variables < 7:
+        raise ValueError("benchmark needs at least 5 constraints and 7 variables")
+
     rng = np.random.default_rng(seed)
     A = (rng.random((n_constraints, n_variables)) < density).astype(np.int8)
 
+    # Isolated 5-cycle: x_i + x_{i+1} >= 1. This substructure has a
+    # fractional LP optimum at 0.5 on each core variable under equal costs.
+    A[:5, :] = 0
+    for i in range(5):
+        A[i, i] = 1
+        A[i, (i + 1) % 5] = 1
+    if n_constraints > 5:
+        A[5:, :5] = 0
+
+    # Repair random rows using only non-core columns so the odd-cycle core
+    # remains structurally isolated from the random remainder.
     required = max(1, int(max_demand))
-    for i in range(n_constraints):
+    for i in range(5, n_constraints):
         current = int(A[i].sum())
         if current < required:
-            candidates = np.flatnonzero(A[i] == 0)
+            candidates = np.flatnonzero(A[i, 5:] == 0) + 5
             chosen = rng.choice(candidates, size=required-current, replace=False)
             A[i, chosen] = 1
 
     degree = A.sum(axis=0)
-    # Encourage nontrivial trade-offs: cost partly correlates with coverage but
-    # contains independent noise and nonlinear variation.
     base = rng.uniform(8.0, 35.0, size=n_variables)
     costs = base + 1.8 * np.sqrt(degree + 1.0) + 3.5 * np.sin(np.arange(n_variables)*0.37)
     costs += rng.normal(0.0, 2.5, size=n_variables)
     costs = np.clip(costs, 1.0, None)
+    costs[:5] = 20.0
 
     demands = rng.integers(1, max_demand + 1, size=n_constraints, dtype=np.int32)
     demands = np.minimum(demands, A.sum(axis=1)).astype(np.int32)
+    demands[:5] = 1
     return SetCoverInstance(A, costs.astype(np.float64), demands)
 
 
@@ -91,3 +107,11 @@ def build_scip_model(instance: SetCoverInstance, *, hide_output: bool = True):
         )
     model.setMinimize()
     return model, variables
+
+
+def configure_branching_research_mode(model):
+    """Disable presolve, primal heuristics and separation to isolate branching."""
+    from pyscipopt import SCIP_PARAMSETTING
+    model.setPresolve(SCIP_PARAMSETTING.OFF)
+    model.setHeuristics(SCIP_PARAMSETTING.OFF)
+    model.setSeparating(SCIP_PARAMSETTING.OFF)
