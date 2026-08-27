@@ -2,7 +2,7 @@
 
 A from-scratch **Learning to Branch** research implementation that trains a bipartite graph neural network to imitate strong branching and then inserts the learned variable-selection policy back into SCIP's branch-and-bound loop through a PySCIPOpt branching-rule callback.
 
-The repository is not a classifier detached from a solver. Its full pipeline is:
+The repository is not a classifier detached from a solver:
 
 ```text
 MILP instances
@@ -17,9 +17,9 @@ constraint-variable bipartite GNN
     ↓
 offline imitation learning
     ↓
-PySCIPOpt learned branching rule
+PySCIPOpt learned Branchrule
     ↓
-branch-and-bound benchmark
+actual branch-and-bound benchmark
 ```
 
 ## Research lineage
@@ -30,7 +30,7 @@ This repository is an independent educational implementation. It does not copy `
 
 ## MILP family
 
-The benchmark uses random minimum-cost **set covering** instances:
+The benchmark uses minimum-cost set covering:
 
 ```text
 minimize    sum_j c[j] x[j]
@@ -40,23 +40,35 @@ subject to  sum_j A[i,j] x[j] >= demand[i]    for every row i
 x[j] ∈ {0,1}
 ```
 
-The generator creates heterogeneous column costs and random sparse incidence structure while repairing rows only as needed to guarantee feasibility. No optimum is planted.
-
-## Why set covering
-
-Set covering has a natural MILP graph:
+Most of the instance is random sparse set covering with heterogeneous column costs. A small isolated five-variable odd-cycle covering core is added deliberately:
 
 ```text
-constraint node i
-      ↕  A[i,j]
-variable node j
+x0 + x1 >= 1
+x1 + x2 >= 1
+x2 + x3 >= 1
+x3 + x4 >= 1
+x4 + x0 >= 1
 ```
 
-It also makes it possible to generate many independent train/validation/test MILPs with identical tensor dimensions while preserving nontrivial fractional LP relaxations.
+Under the controlled solver configuration below, this core provides a reproducible fractional LP structure so that real branching callbacks are exercised. It is **not** an optimal integer solution planted into the data.
+
+## Controlled branching-research mode
+
+Expert collection and all four branching-policy benchmarks use the same SCIP research configuration:
+
+```text
+presolve          OFF
+primal heuristics OFF
+separation/cuts   OFF
+```
+
+The purpose is to isolate the effect of branching and prevent presolve, heuristics or cutting planes from eliminating the branching decisions being studied.
+
+This scope matters: `default` in the benchmark means **SCIP's default branching policy inside this controlled branching-research configuration**. It is not a comparison against unrestricted full-default SCIP.
 
 ## Expert data: real SCIP strong branching
 
-At an LP branching node, the collector calls:
+At an LP branching node, the collector obtains SCIP's actual candidate set and calls:
 
 ```text
 getLPBranchCands()
@@ -66,49 +78,47 @@ getBranchScoreMultiple(...)
 endStrongbranch()
 ```
 
-for the current SCIP candidate variables.
+Strong branching evaluates the down/up child LPs. The candidate with the best SCIP branching score becomes the imitation target. Calls use `idempotent=True` for data extraction so the query is intended to preserve solver state.
 
-Strong branching evaluates both child LPs and produces a score for each candidate. The highest-score candidate becomes the imitation-learning target.
-
-The calls use `idempotent=True` so the data query is intended to preserve SCIP state rather than turning data generation into an uncontrolled solver modification.
-
-After recording the state, the collector actually branches on the expert-selected variable. Training data therefore come from a strong-branching trajectory, not from independently sampled fractional vectors.
+After recording the state, the collector actually branches on the expert-selected variable. Training samples therefore come from solver states visited along strong-branching trajectories rather than arbitrary fractional vectors.
 
 ## Bipartite state representation
 
-Constraint features include:
+Constraint features:
 
 - demand relative to row degree;
 - normalized row degree;
 - normalized demand.
 
-Variable features include:
+Variable features:
 
 - normalized objective coefficient;
 - normalized column degree;
 - cost per covered row;
-- current LP solution;
+- current LP solution value;
 - fractional part;
 - reduced cost;
-- current branching-candidate indicator.
+- branching-candidate indicator.
 
-Edge features include:
+Edge features:
 
 - binary incidence coefficient;
 - incidence-weighted normalized variable cost.
 
+SCIP may expose transformed variable names during solving. The implementation maps both original and transformed names back to the benchmark variable index instead of assuming that solver-side names remain unchanged.
+
 The GNN never receives the expert answer as an input feature.
 
-## GNN architecture
+## Pure-PyTorch GNN
 
-No graph-learning framework is required. Message passing is implemented directly in PyTorch.
+No graph-learning framework is required. Message passing is implemented directly in PyTorch:
 
 ```text
 constraint embedding
 variable embedding
 edge embedding
        ↓
-constraint-variable edge MLP
+edge-message MLP
        ↓
 incidence-masked messages
        ↓
@@ -119,110 +129,140 @@ residual update + LayerNorm
 variable branching logits
 ```
 
-At inference time, all non-candidate variables are masked to `-∞`. The learned rule can therefore choose only from SCIP's current LP branching candidate set.
+At inference, all non-candidate variables are masked to `-∞`, so the learned policy can select only a variable currently supplied by SCIP as an LP branching candidate.
 
-## Training objective
+## Imitation objective
 
-For every expert state:
+For each expert state:
 
 ```text
-candidate logits
-    ↓
+GNN variable logits
+      ↓
 mask non-candidates
-    ↓
+      ↓
 cross entropy
-    ↓
+      ↓
 strong-branching best candidate
 ```
 
-Validation reports **expert imitation accuracy**.
+Validation reports expert-imitation accuracy. This is a learning diagnostic, not the final optimization KPI.
 
-This metric is useful for learning diagnostics but is not treated as the final solver KPI.
+## Real solver integration
 
-## Solver integration
+The trained network is wrapped in a genuine PySCIPOpt `Branchrule`.
 
-The learned network is wrapped in a genuine PySCIPOpt `Branchrule`.
+At every eligible LP branching callback:
 
-At every LP branching callback:
-
-1. SCIP provides the current candidate variables;
-2. dynamic LP features are extracted;
-3. the GNN scores the full variable partition;
+1. SCIP supplies the current candidates and LP values;
+2. dynamic graph features are extracted;
+3. the GNN scores variables;
 4. non-candidates are masked;
-5. the highest-scoring candidate is mapped back to its SCIP variable;
+5. the selected graph variable is mapped back to the current SCIP candidate object;
 6. `branchVarVal()` creates the child nodes.
 
-If state extraction or candidate mapping fails, the callback returns `DIDNOTRUN`, allowing SCIP to continue with another rule instead of producing an invalid branch.
+If no valid candidate can be mapped, the callback returns `DIDNOTRUN` so SCIP can safely fall back to another rule.
 
-## Benchmarks
+## Benchmark policies
 
-The same held-out MILP instances are solved with:
+Each held-out instance is solved under the same controlled solver settings with:
 
 ```text
 SCIP default branching
 SCIP pseudocost branching
-strong-branching reference
+custom strong-branching reference
 learned GNN branching
 ```
 
-Reported metrics:
+Reported metrics are:
 
 - solved-instance count;
-- branch-and-bound node count;
+- B&B node count;
 - SCIP solving time;
 - final MIP gap;
-- expert imitation accuracy.
+- expert-imitation accuracy.
 
-The project does **not** infer solver improvement from classification accuracy.
+The custom strong rule is an educational reference based on explicit `getVarStrongbranch` calls. It does not claim to reproduce every interaction of SCIP's production `fullstrong` or `relpscost` implementations.
 
-A learned policy is only better if the actual branch-and-bound metrics support that conclusion.
+## Regression tests
 
-## Strong-branching reference
+The suite covers:
 
-A custom reference rule applies the same strong-branch scoring routine at every eligible LP node and branches on the best candidate.
-
-This is intentionally expensive and serves as an expert/reference policy, not a claim that full strong branching is the preferred production setting.
-
-PySCIPOpt's own documentation notes that a simplified strong-branching example does not reproduce every subtle interaction of SCIP's production branching rules. The same caveat applies here.
-
-## Local verification
-
-The pure graph/model code is testable without SCIP and covers:
-
-- deterministic instance generation;
-- row feasibility;
-- graph tensor dimensions;
-- incidence masking;
+- deterministic instance generation and row feasibility;
+- graph feature dimensions and incidence representation;
+- GNN shape and gradient flow;
 - candidate masking;
-- GNN gradient flow;
-- masked branching loss;
-- NPZ expert-state round-trip.
+- masked cross-entropy behavior;
+- expert-state NPZ round trip;
+- batched tensorization;
+- a real PySCIPOpt set-cover solve;
+- real strong-branching state collection from SCIP.
 
-When PySCIPOpt is installed, additional integration tests run a real SCIP model and a real strong-branching collector.
+## Validated GitHub Actions run
 
-## GitHub Actions integration
-
-CI installs current PySCIPOpt and CPU PyTorch, prints the actual SCIP/PySCIPOpt versions, then runs:
+GitHub Actions run `33105697429` completed successfully on Ubuntu 24.04 / CPython 3.12.14 with:
 
 ```text
-pure graph/model self-test
-        ↓
-regression tests
-        ↓
-real SCIP solve
-        ↓
-real strong-branching expert collection
-        ↓
-GNN imitation training
-        ↓
-learned Branchrule callback
-        ↓
-default / pseudocost / strong / learned benchmark
+PyTorch      2.13.0+cpu
+PySCIPOpt    6.2.1
+SCIP         10.0.2
+NumPy        2.5.2
 ```
 
-The CI smoke benchmark is intentionally small. It validates mechanics and integration; it is not a publication-scale branching benchmark.
+The pure self-test and all **9 regression/integration tests** passed. The CI run then collected real strong-branching states, trained the GNN and executed the learned PySCIPOpt branching callback in held-out SCIP solves.
 
-## Run
+CI smoke configuration:
+
+```text
+constraints                18
+variables                  40
+train instances             4
+validation instances        2
+test instances              3
+expert samples/instance     5
+collection node limit      80
+GNN epochs                  5
+hidden dimension           32
+message-passing layers      2
+time limit                  6 s
+```
+
+Observed learning result:
+
+```text
+collected expert states                 8
+best validation expert accuracy       50.0%
+```
+
+Observed branch-and-bound result:
+
+```text
+policy       solved    mean nodes    mean time    mean final gap
+
+default       3/3         1.67        0.001 s        0.00000
+pseudocost    3/3         4.33        0.001 s        0.00000
+strong        3/3         3.67        0.001 s        0.00000
+learned       3/3        11.67        0.008 s        0.00000
+```
+
+This is intentionally reported as a **negative learned-policy result**. In this tiny CI experiment, the learned branching rule created a larger search tree and took longer than the controlled default policy. Only eight expert states were collected and the best validation imitation accuracy was 50%, so the run is far too small to support a solver-performance claim.
+
+The CI result validates the end-to-end mechanics:
+
+```text
+real SCIP candidate states
+→ real strong-branching labels
+→ GNN training
+→ learned Branchrule inference
+→ actual B&B consequences
+```
+
+It does **not** validate a learned speedup.
+
+The millisecond timings are runner/workload observations and are not portable performance guarantees.
+
+Run: https://github.com/jorsacademy/learning-to-branch-mip-gnn-scip-pytorch/actions/runs/33105697429
+
+## Run locally
 
 Install:
 
@@ -230,19 +270,19 @@ Install:
 pip install -r requirements.txt
 ```
 
-Pure self-test:
+Pure graph/model self-test:
 
 ```bash
 python learning_to_branch.py --self-test
 ```
 
-All tests:
+Tests:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-A development integration experiment:
+Integration experiment:
 
 ```bash
 python learning_to_branch.py \
@@ -266,19 +306,22 @@ python learning_to_branch.py \
 
 Exact statements are deliberately narrow:
 
-- SCIP solves each reported MILP according to its solver status and configured limits;
-- expert targets are derived from explicit strong-branch evaluations of current SCIP candidates;
+- SCIP solves each reported instance according to its solver status and configured limits;
+- the successful CI smoke solved all 3/3 held-out instances to zero reported final MIP gap for every compared policy;
+- expert labels are generated by explicit strong-branch evaluations of the current SCIP candidate set;
 - the learned callback branches only on candidates supplied by SCIP.
 
 Not claimed:
 
 - the GNN reproduces strong branching perfectly;
-- expert imitation accuracy guarantees a smaller B&B tree;
-- the learned rule is globally optimal;
-- the small synthetic benchmark establishes universal speedup;
-- full strong branching in this repository reproduces every internal detail of SCIP's production `fullstrong`/`relpscost` implementations.
+- imitation accuracy guarantees a smaller B&B tree;
+- the learned branching rule is globally optimal;
+- the current smoke experiment demonstrates a speedup;
+- the controlled benchmark represents full-default SCIP behavior;
+- the synthetic set-cover results transfer directly to production MIPs;
+- the custom Python strong-branching reference reproduces every internal detail of SCIP's production branching rules.
 
-The main purpose is to demonstrate the complete learned-solver-control loop with visible failure modes and measurable solver consequences.
+The purpose of the project is to expose the complete learned-solver-control loop, including cases where the learned policy is worse than the solver baseline.
 
 ## References
 
