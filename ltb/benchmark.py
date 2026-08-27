@@ -1,7 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
-from .problem import build_scip_model, generate_set_cover_instance
+from .problem import (
+    build_scip_model,
+    configure_branching_research_mode,
+    generate_set_cover_instance,
+)
 from .branching import LearnedBranchRule, StrongBranchRule
 
 
@@ -18,6 +22,7 @@ class SolveMetrics:
 
 def solve_instance(instance, *, policy, network=None, seed=0, time_limit=15.0, node_limit=5000):
     scip, _ = build_scip_model(instance)
+    configure_branching_research_mode(scip)
     scip.setRealParam("limits/time", float(time_limit))
     scip.setLongintParam("limits/nodes", int(node_limit))
     scip.setIntParam("randomization/randomseedshift", int(seed % 2_000_000_000))
